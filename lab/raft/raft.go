@@ -623,7 +623,7 @@ func (rf *Raft) replicateLogs() {
 	if unreachablePeers >= rf.minVotesForQuorum() {
 		log.Printf("%d detected network partition. Stepping down from Leader state", rf.me)
 		rf.volatile.raftState = Follower
-		rf.resetElectionTimer(000)
+		rf.resetElectionTimer(1000)
 		return
 	}
 
@@ -799,16 +799,6 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 		}
 	}
 
-	if failedReqs >= rf.minVotesForQuorum() {
-		if attempt > 10 {
-			log.Printf("%d detected network partition. Delaying RequestVote", rf.me)
-			rf.resetElectionTimer(000)
-			return
-		}
-		go rf.triggerElection(false, attempt+1)
-		return
-	}
-
 	if votes >= rf.minVotesForQuorum() {
 		rf.volatile.raftState = Leader
 		for i, _ := range rf.volatileLeader.nextIndex {
@@ -827,6 +817,14 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 			rf.volatile.raftState = Follower
 			log.Printf("%d im not leader votes=%d highestDisagreeingTerm=%d", rf.me, votes, highestDisagreeingTerm)
 			rf.persist()
+		} else if failedReqs >= rf.minVotesForQuorum() {
+			if attempt > 10 {
+				log.Printf("%d detected network partition. Delaying RequestVote", rf.me)
+				rf.resetElectionTimer(1000)
+				return
+			}
+			go rf.triggerElection(false, attempt+1)
+			return
 		}
 	}
 
