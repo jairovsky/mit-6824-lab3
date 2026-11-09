@@ -497,77 +497,78 @@ func (rf *Raft) replicateLogs() {
 
 	wg.Add(len(rf.peers) - 1)
 	for i, _ := range rf.peers {
-		if i != rf.me {
-
-			completed := make(chan RequestResult, 1)
-
-			icopy := i
-
-			var prevLogIdx, prevLogTerm int
-			var entries []Log
-			if len(rf.durable.log) > 0 {
-				nextIndex := rf.volatileLeader.nextIndex[icopy]
-				prevLogIdx = nextIndex - 1
-
-				if prevLogIdx == -1 {
-					prevLogIdx = -1
-					prevLogTerm = -1
-				} else {
-					prevLogTerm = rf.durable.log[prevLogIdx].Term
-				}
-				entries = make([]Log, len(rf.durable.log[nextIndex:]))
-				copy(entries, rf.durable.log[nextIndex:])
-				logLengthToSend[icopy] = len(entries)
-			}
-			log.Printf("%d entries to send %v", rf.me, entries)
-
-			reqs[icopy] = AppendEntriesArgs{
-				Term:         rf.durable.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: prevLogIdx,
-				PrevLogTerm:  prevLogTerm,
-				Entries:      entries,
-				LeaderCommit: rf.volatile.commitIndex,
-			}
-
-			reply := AppendEntriesReply{}
-
-			timeSinceLastInteraction :=
-				time.Since(rf.volatileLeader.lastInteraction[icopy])
-
-			noEntriesToSend := logLengthToSend[icopy] == 0
-			talkedRecently := timeSinceLastInteraction <= maxIdleInterval
-
-			if noEntriesToSend && talkedRecently {
-				msg := "%d does not need to send AppendEntries to %d"
-				log.Printf(msg, rf.me, icopy)
-				wg.Done()
-				continue
-			}
-			requestSent[icopy] = true
-
-			go (func() {
-
-				log.Printf("%d sends AppendEntries to %d\n", rf.me, icopy)
-				ok := rf.sendAppendEntries(icopy, &reqs[icopy], &reply)
-				completed <- RequestResult{ok, reply}
-				close(completed)
-			})()
-			go (func() {
-				defer wg.Done()
-				select {
-				case result := <-completed:
-					if requestSent[icopy] {
-						log.Printf("request ended ok %d -> %d\n", rf.me, icopy)
-						requestSuccess[icopy] = result.ok
-						resps[icopy] = result.reply
-					}
-				case <-time.After(requestTimeout):
-					log.Printf("request timed out %d -> %d\n", rf.me, icopy)
-					requestSuccess[icopy] = false
-				}
-			})()
+		if i == rf.me {
+			continue
 		}
+
+		completed := make(chan RequestResult, 1)
+
+		icopy := i
+
+		var prevLogIdx, prevLogTerm int
+		var entries []Log
+		if len(rf.durable.log) > 0 {
+			nextIndex := rf.volatileLeader.nextIndex[icopy]
+			prevLogIdx = nextIndex - 1
+
+			if prevLogIdx == -1 {
+				prevLogIdx = -1
+				prevLogTerm = -1
+			} else {
+				prevLogTerm = rf.durable.log[prevLogIdx].Term
+			}
+			entries = make([]Log, len(rf.durable.log[nextIndex:]))
+			copy(entries, rf.durable.log[nextIndex:])
+			logLengthToSend[icopy] = len(entries)
+		}
+		log.Printf("%d entries to send %v", rf.me, entries)
+
+		reqs[icopy] = AppendEntriesArgs{
+			Term:         rf.durable.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIdx,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entries,
+			LeaderCommit: rf.volatile.commitIndex,
+		}
+
+		reply := AppendEntriesReply{}
+
+		timeSinceLastInteraction :=
+			time.Since(rf.volatileLeader.lastInteraction[icopy])
+
+		noEntriesToSend := logLengthToSend[icopy] == 0
+		talkedRecently := timeSinceLastInteraction <= maxIdleInterval
+
+		if noEntriesToSend && talkedRecently {
+			msg := "%d does not need to send AppendEntries to %d"
+			log.Printf(msg, rf.me, icopy)
+			wg.Done()
+			continue
+		}
+		requestSent[icopy] = true
+
+		go (func() {
+
+			log.Printf("%d sends AppendEntries to %d\n", rf.me, icopy)
+			ok := rf.sendAppendEntries(icopy, &reqs[icopy], &reply)
+			completed <- RequestResult{ok, reply}
+			close(completed)
+		})()
+		go (func() {
+			defer wg.Done()
+			select {
+			case result := <-completed:
+				if requestSent[icopy] {
+					log.Printf("request ended ok %d -> %d\n", rf.me, icopy)
+					requestSuccess[icopy] = result.ok
+					resps[icopy] = result.reply
+				}
+			case <-time.After(requestTimeout):
+				log.Printf("request timed out %d -> %d\n", rf.me, icopy)
+				requestSuccess[icopy] = false
+			}
+		})()
 	}
 
 	rf.mu.Unlock()
@@ -592,13 +593,16 @@ func (rf *Raft) replicateLogs() {
 	highestDisagreeingTerm := -1
 	unreachablePeers := 0
 	for i, r := range resps {
-		if i != rf.me && requestSent[i] && !requestSuccess[i] {
+		if i == rf.me {
+			continue
+		}
+		if requestSent[i] && !requestSuccess[i] {
 			rf.volatileLeader.failedRounds[i] += 1
 			if rf.volatileLeader.failedRounds[i] > 5 {
 				unreachablePeers += 1
 			}
 		}
-		if i != rf.me && requestSuccess[i] {
+		if requestSuccess[i] {
 			rf.volatileLeader.failedRounds[i] = 0
 			log.Printf("%d response from %d %v", rf.me, i, r)
 			if !r.Success {
@@ -742,31 +746,32 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 
 	wg.Add(len(rf.peers) - 1)
 	for i, _ := range rf.peers {
-		if i != rf.me {
-
-			completed := make(chan RequestResult, 1)
-
-			icopy := i
-
-			go (func() {
-				reply := RequestVoteReply{}
-				log.Printf("%d sends RequestVote to %d\n", rf.me, icopy)
-				ok := rf.sendRequestVote(icopy, &req, &reply)
-				completed <- RequestResult{ok, reply}
-				close(completed)
-			})()
-			go (func() {
-				defer wg.Done()
-				select {
-				case result := <-completed:
-					requestSuccess[icopy] = result.ok
-					resps[icopy] = result.reply
-				case <-time.After(requestVoteTimeout):
-					log.Printf("request timed out %d -> %d\n", rf.me, icopy)
-					requestSuccess[icopy] = false
-				}
-			})()
+		if i == rf.me {
+			continue
 		}
+
+		completed := make(chan RequestResult, 1)
+
+		icopy := i
+
+		go (func() {
+			reply := RequestVoteReply{}
+			log.Printf("%d sends RequestVote to %d\n", rf.me, icopy)
+			ok := rf.sendRequestVote(icopy, &req, &reply)
+			completed <- RequestResult{ok, reply}
+			close(completed)
+		})()
+		go (func() {
+			defer wg.Done()
+			select {
+			case result := <-completed:
+				requestSuccess[icopy] = result.ok
+				resps[icopy] = result.reply
+			case <-time.After(requestVoteTimeout):
+				log.Printf("request timed out %d -> %d\n", rf.me, icopy)
+				requestSuccess[icopy] = false
+			}
+		})()
 	}
 
 	rf.mu.Unlock()
@@ -786,10 +791,13 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 	highestDisagreeingTerm := -1
 	failedReqs := 0
 	for i, r := range resps {
-		if i != rf.me && !requestSuccess[i] {
+		if i == rf.me {
+			continue
+		}
+		if !requestSuccess[i] {
 			failedReqs += 1
 		}
-		if i != rf.me && requestSuccess[i] {
+		if requestSuccess[i] {
 			log.Printf("%d response from %d %v", rf.me, i, r)
 			if r.VoteGranted {
 				votes += 1
