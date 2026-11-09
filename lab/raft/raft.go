@@ -487,17 +487,16 @@ func (rf *Raft) replicateLogs() {
 	resps := make([]AppendEntriesReply, len(rf.peers))
 	requestSuccess := make([]bool, len(rf.peers))
 	logLengthToSend := make([]int, len(rf.peers))
-	hadInteraction := make([]bool, len(rf.peers))
+	requestSent := make([]bool, len(rf.peers))
 
 	type RequestResult struct {
-		sent  bool
 		ok    bool
 		reply AppendEntriesReply
 	}
 
+	wg.Add(len(rf.peers) - 1)
 	for i, _ := range rf.peers {
 		if i != rf.me {
-			wg.Add(1)
 
 			completed := make(chan RequestResult, 1)
 
@@ -530,39 +529,38 @@ func (rf *Raft) replicateLogs() {
 				LeaderCommit: rf.volatile.commitIndex,
 			}
 
+			reply := AppendEntriesReply{}
+
+			timeSinceLastInteraction :=
+				time.Since(rf.volatileLeader.lastInteraction[icopy])
+
+			noEntriesToSend := logLengthToSend[icopy] == 0
+			talkedRecently := timeSinceLastInteraction <= maxIdleInterval
+
+			if noEntriesToSend && talkedRecently {
+				msg := "%d does not need to send AppendEntries to %d"
+				log.Printf(msg, rf.me, icopy)
+				wg.Done()
+				continue
+			}
+			requestSent[icopy] = true
+
 			go (func() {
-
-				reply := AppendEntriesReply{}
-
-				timeSinceLastInteraction :=
-					time.Since(rf.volatileLeader.lastInteraction[icopy])
-
-				noEntriesToSend := logLengthToSend[icopy] == 0
-				talkedRecently := timeSinceLastInteraction <= maxIdleInterval
-
-				if noEntriesToSend && talkedRecently {
-					msg := "%d does not need to send AppendEntries to %d"
-					log.Printf(msg, rf.me, icopy)
-					completed <- RequestResult{false, false, reply}
-					close(completed)
-					return
-				}
 
 				log.Printf("%d sends AppendEntries to %d\n", rf.me, icopy)
 				ok := rf.sendAppendEntries(icopy, &reqs[icopy], &reply)
-				completed <- RequestResult{true, ok, reply}
+				completed <- RequestResult{ok, reply}
 				close(completed)
 			})()
 			go (func() {
 				defer wg.Done()
 				select {
 				case result := <-completed:
-					if result.sent {
+					if requestSent[icopy] {
 						log.Printf("request ended ok %d -> %d\n", rf.me, icopy)
 						requestSuccess[icopy] = result.ok
 						resps[icopy] = result.reply
 					}
-					hadInteraction[icopy] = result.sent
 				case <-time.After(requestTimeout):
 					log.Printf("request timed out %d -> %d\n", rf.me, icopy)
 					requestSuccess[icopy] = false
@@ -584,7 +582,7 @@ func (rf *Raft) replicateLogs() {
 
 	now := time.Now()
 	for i, _ := range rf.volatileLeader.lastInteraction {
-		if hadInteraction[i] {
+		if requestSent[i] && requestSuccess[i] {
 			rf.volatileLeader.lastInteraction[i] = now
 		}
 	}
@@ -593,7 +591,7 @@ func (rf *Raft) replicateLogs() {
 	highestDisagreeingTerm := -1
 	unreachablePeers := 0
 	for i, r := range resps {
-		if i != rf.me && !requestSuccess[i] {
+		if i != rf.me && requestSent[i] && !requestSuccess[i] {
 			rf.volatileLeader.failedRounds[i] += 1
 			if rf.volatileLeader.failedRounds[i] > 10 {
 				unreachablePeers += 1
@@ -625,7 +623,7 @@ func (rf *Raft) replicateLogs() {
 	if unreachablePeers >= rf.minVotesForQuorum() {
 		log.Printf("%d detected network partition. Stepping down from Leader state", rf.me)
 		rf.volatile.raftState = Follower
-		rf.persist()
+		rf.resetElectionTimer(000)
 		return
 	}
 
@@ -636,7 +634,8 @@ func (rf *Raft) replicateLogs() {
 		rf.persist()
 	} else {
 		log.Printf("%d matchIndex %v", rf.me, rf.volatileLeader.matchIndex)
-		for n := rf.volatile.commitIndex + 1; n <= rf.lastLogIndex(); n += 1 {
+		lastLogIdx := rf.lastLogIndex()
+		for n := lastLogIdx; n > rf.volatile.commitIndex; n -= 1 {
 			matches := 1
 			for _, mi := range rf.volatileLeader.matchIndex {
 				if mi >= n && rf.durable.log[n].Term == rf.durable.currentTerm {
@@ -694,6 +693,11 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 
 	rf.mu.Lock()
 
+	if !increaseTerm && rf.volatile.raftState != Candidate {
+		rf.mu.Unlock()
+		return
+	}
+
 	log.Printf("%d trigger election", rf.me)
 	rf.volatile.raftState = Candidate
 	if increaseTerm {
@@ -720,9 +724,9 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 		reply RequestVoteReply
 	}
 
+	wg.Add(len(rf.peers) - 1)
 	for i, _ := range rf.peers {
 		if i != rf.me {
-			wg.Add(1)
 
 			completed := make(chan RequestResult, 1)
 
@@ -783,7 +787,7 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 	if failedReqs >= rf.minVotesForQuorum() {
 		if attempt > 10 {
 			log.Printf("%d detected network partition. Delaying RequestVote", rf.me)
-			rf.resetElectionTimer(1000)
+			rf.resetElectionTimer(000)
 			return
 		}
 		go rf.triggerElection(false, attempt+1)
