@@ -456,9 +456,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-const heartbeatInterval time.Duration = time.Duration(5) * time.Millisecond
-const requestTimeout time.Duration = time.Duration(10) * time.Millisecond
-const maxIdleInterval time.Duration = time.Duration(30) * time.Millisecond
+const heartbeatInterval time.Duration = time.Duration(10) * time.Millisecond
+const requestTimeout time.Duration = time.Duration(30) * time.Millisecond
+const requestVoteTimeout time.Duration = time.Duration(10) * time.Millisecond
+const maxIdleInterval time.Duration = time.Duration(80) * time.Millisecond
 
 func (rf *Raft) heartbeatLoop() {
 	for {
@@ -593,7 +594,7 @@ func (rf *Raft) replicateLogs() {
 	for i, r := range resps {
 		if i != rf.me && requestSent[i] && !requestSuccess[i] {
 			rf.volatileLeader.failedRounds[i] += 1
-			if rf.volatileLeader.failedRounds[i] > 10 {
+			if rf.volatileLeader.failedRounds[i] > 5 {
 				unreachablePeers += 1
 			}
 		}
@@ -760,7 +761,7 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 				case result := <-completed:
 					requestSuccess[icopy] = result.ok
 					resps[icopy] = result.reply
-				case <-time.After(requestTimeout):
+				case <-time.After(requestVoteTimeout):
 					log.Printf("request timed out %d -> %d\n", rf.me, icopy)
 					requestSuccess[icopy] = false
 				}
@@ -818,7 +819,7 @@ func (rf *Raft) triggerElection(increaseTerm bool, attempt int) {
 			log.Printf("%d im not leader votes=%d highestDisagreeingTerm=%d", rf.me, votes, highestDisagreeingTerm)
 			rf.persist()
 		} else if failedReqs >= rf.minVotesForQuorum() {
-			if attempt > 10 {
+			if attempt > 5 {
 				log.Printf("%d detected network partition. Delaying RequestVote", rf.me)
 				rf.resetElectionTimer(1000)
 				return
