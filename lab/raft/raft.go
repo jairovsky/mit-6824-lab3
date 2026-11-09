@@ -636,13 +636,28 @@ func (rf *Raft) replicateLogs() {
 		log.Printf("%d matchIndex %v", rf.me, rf.volatileLeader.matchIndex)
 		lastLogIdx := rf.lastLogIndex()
 		for n := lastLogIdx; n > rf.volatile.commitIndex; n -= 1 {
-			matches := 1
-			for _, mi := range rf.volatileLeader.matchIndex {
-				if mi >= n && rf.durable.log[n].Term == rf.durable.currentTerm {
-					matches += 1
+
+			matchesCurrTerm := 1
+			matchesPrevTerm := 1
+			entryFromCurrTerm :=
+				rf.durable.log[n].Term == rf.durable.currentTerm
+
+			for i, mi := range rf.volatileLeader.matchIndex {
+
+				if mi >= n && entryFromCurrTerm {
+					matchesCurrTerm += 1
+				}
+
+				if mi == lastLogIdx &&
+					resps[i].Success &&
+					logLengthToSend[i] == 0 {
+					matchesPrevTerm += 1
 				}
 			}
-			if matches >= rf.minVotesForQuorum() {
+
+			minMatchCurrTerm := matchesCurrTerm >= rf.minVotesForQuorum()
+			allMatchPrevTerm := matchesPrevTerm >= len(rf.peers)
+			if minMatchCurrTerm || allMatchPrevTerm {
 				log.Printf("%d commit index update %d", rf.me, n)
 				rf.volatile.commitIndex = n
 			}
