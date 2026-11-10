@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	// "time"
 )
 
 const Debug = 0
@@ -18,10 +19,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-type Op struct {
+type Cmd struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Op   string
+	Args interface{}
 }
 
 type KVServer struct {
@@ -34,14 +37,135 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	store  map[string]string
+	notifs map[int]chan RaftResult
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+type RaftResult struct {
+	err Err
+	val string
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+func (kv *KVServer) L() {
+	kv.mu.Lock()
+}
+func (kv *KVServer) Unl() {
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) Get(args *GetArgs, reply **GetReply) {
+
+	cmd := Cmd{
+		Op:   "Get",
+		Args: []string{args.Key},
+	}
+
+	kv.L()
+	idx, _, isLeader := kv.rf.Start(cmd)
+
+	if !isLeader {
+		*reply = &GetReply{
+			Err: ErrWrongLeader,
+		}
+		kv.Unl()
+
+		return
+	}
+
+	notification := make(chan RaftResult, 1)
+	kv.notifs[idx] = notification
+	kv.Unl()
+
+	log.Printf("%d Get waiting confirmation %d", kv.me, idx-1)
+	select {
+	case rr := <-notification:
+		*reply = &GetReply{
+			Err:   rr.err,
+			Value: rr.val,
+		}
+		// add case handle timeouts
+	}
+	kv.L()
+	delete(kv.notifs, idx)
+	kv.Unl()
+}
+
+func (kv *KVServer) PutAppend(args *PutAppendArgs, reply **PutAppendReply) {
+
+	cmd := Cmd{
+		Op:   args.Op,
+		Args: []string{args.Key, args.Value},
+	}
+
+	kv.L()
+	idx, _, isLeader := kv.rf.Start(cmd)
+
+	if !isLeader {
+		*reply = &PutAppendReply{
+			Err: ErrWrongLeader,
+		}
+		kv.Unl()
+		return
+	}
+
+	notification := make(chan RaftResult, 1)
+	kv.notifs[idx] = notification
+	kv.Unl()
+
+	log.Printf("%d PutAppend waiting confirmation %d", kv.me, idx-1)
+	select {
+	case rr := <-notification:
+		*reply = &PutAppendReply{
+			Err: rr.err,
+		}
+		// add case handle timeouts
+	}
+
+	kv.L()
+	delete(kv.notifs, idx)
+	kv.Unl()
+}
+
+func (kv *KVServer) raftLoop() {
+
+	for {
+		select {
+		case msg := <-kv.applyCh:
+
+			log.Printf("%d ApplyMsg %v", kv.me, msg)
+			kv.L()
+			cmd := msg.Command.(Cmd)
+			a := cmd.Args.([]string)
+			var val string
+			var e Err = OK
+			switch cmd.Op {
+			case "Put":
+				kv.store[a[0]] = a[1]
+			case "Append":
+				kv.store[a[0]] = kv.store[a[0]] + a[1]
+			case "Get":
+				v, ok := kv.store[a[0]]
+				val = v
+				if !ok {
+					e = ErrNoKey
+				}
+			}
+
+			ch, hasCh := kv.notifs[msg.CommandIndex]
+			kv.Unl()
+
+			if hasCh {
+
+				rr := RaftResult{
+					err: e,
+					val: val,
+				}
+
+				ch <- rr
+				close(ch)
+			}
+		}
+	}
 }
 
 //
@@ -57,6 +181,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
+	log.Printf("%d ending...", kv.me)
 	// Your code here, if desired.
 }
 
@@ -82,18 +207,22 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
+	labgob.Register(Cmd{})
 
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.store = make(map[string]string)
+	kv.notifs = make(map[int]chan RaftResult)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+
+	go kv.raftLoop()
 
 	return kv
 }
