@@ -132,8 +132,8 @@ func (kv *KVServer) raftLoop() {
 		select {
 		case msg := <-kv.applyCh:
 
-			log.Printf("%d ApplyMsg %v", kv.me, msg)
 			kv.L()
+			log.Printf("%d ApplyMsg %v", kv.me, msg)
 			cmd := msg.Command.(Cmd)
 			a := cmd.Args.([]string)
 			var val string
@@ -217,7 +217,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.store = make(map[string]string)
 	kv.notifs = make(map[int]chan RaftResult)
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, applyChSize)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
@@ -226,3 +226,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	return kv
 }
+
+// applyChSize is the buffer size of the channel used by the Raft library.
+// In a real world scenario this buffer should be scaled according
+// to an expected number of clients, to prevent stalling the
+// Raft library.
+const applyChSize int = 10

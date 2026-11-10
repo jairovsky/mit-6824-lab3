@@ -673,6 +673,7 @@ func (rf *Raft) replicateLogs() {
 
 func (rf *Raft) applyPending() {
 
+loop:
 	for i := rf.volatile.lastApplied + 1; i <= rf.volatile.commitIndex; i += 1 {
 		l := rf.durable.log[i]
 		msg := ApplyMsg{
@@ -681,9 +682,14 @@ func (rf *Raft) applyPending() {
 			CommandIndex: i + offset1IndexedArray,
 		}
 		log.Printf("%d sending ApplyMsg %v", rf.me, msg)
-		rf.volatile.applyCh <- msg
-		log.Printf("%d applied", rf.me)
-		rf.volatile.lastApplied = i
+		select {
+		case rf.volatile.applyCh <- msg:
+			log.Printf("%d applied", rf.me)
+			rf.volatile.lastApplied = i
+		default:
+			log.Printf("%d applyCh full. Skipping...", rf.me)
+			break loop
+		}
 	}
 }
 
