@@ -39,29 +39,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	args := GetArgs{
-		Key: key,
-	}
-	var err Err = ErrUndef
-	reply := GetReply{}
-	var i int = ck.lastLeader
-	for err != OK && err != ErrNoKey {
-		log.Printf("sending Get to server %d %v", i, args)
-		ck.servers[i].Call("KVServer.Get", &args, &reply)
-		err = reply.Err
-		log.Printf("Get response %s", err)
-		if reply.Err == ErrWrongLeader {
-			i = (i + 1) % len(ck.servers)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-	}
-	ck.lastLeader = i
-	log.Printf("Get round ended")
-
-	return reply.Value
+	return ck.send(key, "", "Get")
 }
 
 //
@@ -75,20 +53,24 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	_ = ck.send(key, value, op)
+}
 
-	args := PutAppendArgs{
+func (ck *Clerk) send(key string, value string, op string) string {
+
+	args := KVArgs{
 		Key:   key,
 		Value: value,
 		Op:    op,
 	}
 	var err Err = ErrUndef
-	reply := PutAppendReply{}
+	reply := KVReply{}
 	var i int = ck.lastLeader
-	for err != OK {
-		log.Printf("sending PutAppend to server %d %v", i, args)
-		ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+	for err != OK && err != ErrNoKey {
+		log.Printf("sending %s to server %d %v", op, i, args)
+		ck.servers[i].Call("KVServer.KVRequest", &args, &reply)
 		err = reply.Err
-		log.Printf("PutAppend response %s", err)
+		log.Printf("%s response %s", op, err)
 
 		if reply.Err == ErrWrongLeader {
 			i = (i + 1) % len(ck.servers)
@@ -97,7 +79,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 	}
 	ck.lastLeader = i
-	log.Printf("PutAppend round ended")
+	log.Printf("%s round ended", op)
+
+	return reply.Value
 }
 
 func (ck *Clerk) Put(key string, value string) {

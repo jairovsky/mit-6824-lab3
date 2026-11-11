@@ -53,22 +53,21 @@ func (kv *KVServer) Unl() {
 	kv.mu.Unlock()
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply **GetReply) {
+func (kv *KVServer) KVRequest(args *KVArgs, reply **KVReply) {
 
 	cmd := Cmd{
-		Op:   "Get",
-		Args: []string{args.Key},
+		Op:   args.Op,
+		Args: args.asSlice(),
 	}
 
 	kv.L()
 	idx, _, isLeader := kv.rf.Start(cmd)
 
 	if !isLeader {
-		*reply = &GetReply{
+		*reply = &KVReply{
 			Err: ErrWrongLeader,
 		}
 		kv.Unl()
-
 		return
 	}
 
@@ -76,54 +75,28 @@ func (kv *KVServer) Get(args *GetArgs, reply **GetReply) {
 	kv.notifs[idx] = notification
 	kv.Unl()
 
-	log.Printf("%d Get waiting confirmation %d", kv.me, idx-1)
+	log.Printf("%d %s waiting confirmation %d", kv.me, args.Op, idx-1)
 	select {
 	case rr := <-notification:
-		*reply = &GetReply{
+		*reply = &KVReply{
 			Err:   rr.err,
 			Value: rr.val,
 		}
 		// add case handle timeouts
 	}
+
 	kv.L()
 	delete(kv.notifs, idx)
 	kv.Unl()
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply **PutAppendReply) {
-
-	cmd := Cmd{
-		Op:   args.Op,
-		Args: []string{args.Key, args.Value},
+func (a *KVArgs) asSlice() []string {
+	switch a.Op {
+	case "Get":
+		return []string{a.Key}
+	default:
+		return []string{a.Key, a.Value}
 	}
-
-	kv.L()
-	idx, _, isLeader := kv.rf.Start(cmd)
-
-	if !isLeader {
-		*reply = &PutAppendReply{
-			Err: ErrWrongLeader,
-		}
-		kv.Unl()
-		return
-	}
-
-	notification := make(chan RaftResult, 1)
-	kv.notifs[idx] = notification
-	kv.Unl()
-
-	log.Printf("%d PutAppend waiting confirmation %d", kv.me, idx-1)
-	select {
-	case rr := <-notification:
-		*reply = &PutAppendReply{
-			Err: rr.err,
-		}
-		// add case handle timeouts
-	}
-
-	kv.L()
-	delete(kv.notifs, idx)
-	kv.Unl()
 }
 
 func (kv *KVServer) raftLoop() {
