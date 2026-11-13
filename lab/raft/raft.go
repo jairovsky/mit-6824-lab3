@@ -647,15 +647,13 @@ func (rf *Raft) replicateLogs() {
 			entryFromCurrTerm :=
 				rf.durable.log[n].Term == rf.durable.currentTerm
 
-			for i, mi := range rf.volatileLeader.matchIndex {
+			for _, mi := range rf.volatileLeader.matchIndex {
 
 				if mi >= n && entryFromCurrTerm {
 					matchesCurrTerm += 1
 				}
 
-				if mi == lastLogIdx &&
-					resps[i].Success &&
-					logLengthToSend[i] == 0 {
+				if mi == lastLogIdx {
 					matchesPrevTerm += 1
 				}
 			}
