@@ -7,7 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
-	// "time"
+	"time"
 )
 
 const Debug = 0
@@ -25,6 +25,7 @@ type Cmd struct {
 	// otherwise RPC will break.
 	Op   string
 	Args interface{}
+	Idem string
 }
 
 type KVServer struct {
@@ -37,13 +38,18 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store  map[string]string
-	notifs map[int]chan RaftResult
+	store        map[string]string
+	notifs       map[int]*sync.Cond
+	idems        map[string]RaftResult
+	idemsByIndex map[int]*RaftResult
 }
 
 type RaftResult struct {
-	err Err
-	val string
+	err   Err
+	val   string
+	index int
+	idem  string
+	// TODO add expiration time / background goroutine to collect expired items
 }
 
 func (kv *KVServer) L() {
@@ -53,41 +59,41 @@ func (kv *KVServer) Unl() {
 	kv.mu.Unlock()
 }
 
-func (kv *KVServer) KVRequest(args *KVArgs, reply **KVReply) {
+func disagree() *KVReply {
+	return errorReply(ErrDisagree)
+}
 
-	cmd := Cmd{
-		Op:   args.Op,
-		Args: args.asSlice(),
+func errorReply(e Err) *KVReply {
+	return &KVReply{
+		Err: e,
 	}
-
-	kv.L()
-	idx, _, isLeader := kv.rf.Start(cmd)
-
-	if !isLeader {
-		*reply = &KVReply{
-			Err: ErrWrongLeader,
-		}
-		kv.Unl()
-		return
+}
+func resultReply(rr *RaftResult) *KVReply {
+	return &KVReply{
+		Err:   rr.err,
+		Value: rr.val,
 	}
+}
 
-	notification := make(chan RaftResult, 1)
-	kv.notifs[idx] = notification
-	kv.Unl()
-
-	log.Printf("%d %s waiting confirmation %d", kv.me, args.Op, idx-1)
-	select {
-	case rr := <-notification:
-		*reply = &KVReply{
-			Err:   rr.err,
-			Value: rr.val,
-		}
-		// add case handle timeouts
+func newRaftResult(index int) RaftResult {
+	return RaftResult{
+		err:   ErrUndef,
+		val:   "",
+		index: index,
+		idem:  "",
 	}
+}
 
-	kv.L()
-	delete(kv.notifs, idx)
-	kv.Unl()
+// done indicates whether this RaftResult has been fulfilled
+func (a *RaftResult) done() bool {
+	return a.err != ErrUndef
+}
+
+// matchIdem checks whether a certain index position
+// has the given idempotency key
+func (kv *KVServer) matchIdem(index int, idemKey string) bool {
+	resultAtIdx, exists := kv.idemsByIndex[index]
+	return exists && resultAtIdx.idem == idemKey
 }
 
 func (a *KVArgs) asSlice() []string {
@@ -99,6 +105,120 @@ func (a *KVArgs) asSlice() []string {
 	}
 }
 
+const agreementTimeout time.Duration = 1000 * time.Millisecond
+
+func (kv *KVServer) KVRequest(args *KVArgs, reply **KVReply) {
+
+	done := make(chan *KVReply, 1)
+	go kv.processRequest(args, done)
+	*reply = <-done
+}
+
+func (kv *KVServer) processRequest(args *KVArgs, done chan *KVReply) {
+
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		done <- errorReply(ErrWrongLeader)
+		return
+	}
+
+	kv.L()
+	defer kv.Unl()
+
+	var index int
+	resultAtKey, exists := kv.idems[args.Idem]
+	if exists {
+
+		index = resultAtKey.index
+
+		if resultAtKey.done() {
+			done <- resultReply(kv.idemsByIndex[index])
+			return
+		}
+	} else {
+		cmd := Cmd{
+			Op:   args.Op,
+			Args: args.asSlice(),
+			Idem: args.Idem,
+		}
+
+		var isLeader bool
+		index, _, isLeader = kv.rf.Start(cmd)
+
+		if !isLeader {
+			done <- errorReply(ErrWrongLeader)
+			return
+		}
+
+		kv.idems[args.Idem] = newRaftResult(index)
+		kv.notifs[index] = sync.NewCond(&sync.Mutex{})
+	}
+
+	lastIndex := kv.rf.LastLogIndex()
+	if lastIndex < index {
+		log.Printf("%d this server has discarded entries", kv.me)
+		if notification, exists := kv.notifs[index]; exists {
+			notification.Broadcast()
+		}
+		delete(kv.idems, args.Idem)
+		delete(kv.notifs, index)
+		done <- disagree()
+		return
+	}
+
+	go kv.waitAgreement(index, args, done)
+}
+
+// waitIndex checks if there's ongoing work happening on an index
+// and waits for it to finish, otherwise returns immediately.
+func (kv *KVServer) waitIndex(index int) {
+	kv.L()
+	notification, exists := kv.notifs[index]
+	if exists {
+		notification.L.Lock()
+		kv.Unl()
+		notification.Wait()
+		notification.L.Unlock()
+	} else {
+		kv.Unl()
+	}
+}
+
+func (kv *KVServer) waitAgreement(
+	index int, args *KVArgs, done chan *KVReply) {
+
+	log.Printf("%d %s waiting confirmation %d", kv.me, args.Op, index-1)
+
+	finished := make(chan bool, 1)
+
+	go func() {
+
+		kv.waitIndex(index)
+
+		log.Printf("%d %s confirmed %d", kv.me, args.Op, index-1)
+
+		kv.L()
+		defer kv.Unl()
+
+		if !kv.matchIdem(index, args.Idem) {
+			delete(kv.idems, args.Idem)
+			done <- disagree()
+			finished <- true
+			return
+		}
+
+		done <- resultReply(kv.idemsByIndex[index])
+		finished <- true
+	}()
+
+	select {
+	case <-finished:
+		return
+	case <-time.After(agreementTimeout):
+		done <- errorReply(ErrTimeout)
+		return
+	}
+}
+
 func (kv *KVServer) raftLoop() {
 
 	for {
@@ -106,36 +226,48 @@ func (kv *KVServer) raftLoop() {
 		case msg := <-kv.applyCh:
 
 			kv.L()
+
 			log.Printf("%d ApplyMsg %v", kv.me, msg)
 			cmd := msg.Command.(Cmd)
+			result, exists := kv.idems[cmd.Idem]
 			a := cmd.Args.([]string)
 			var val string
 			var e Err = OK
-			switch cmd.Op {
-			case "Put":
-				kv.store[a[0]] = a[1]
-			case "Append":
-				kv.store[a[0]] = kv.store[a[0]] + a[1]
-			case "Get":
-				v, ok := kv.store[a[0]]
-				val = v
-				if !ok {
-					e = ErrNoKey
+
+			if !(exists && result.done()) {
+				switch cmd.Op {
+				case "Put":
+					kv.store[a[0]] = a[1]
+				case "Append":
+					kv.store[a[0]] = kv.store[a[0]] + a[1]
+				case "Get":
+					v, ok := kv.store[a[0]]
+					val = v
+					if !ok {
+						e = ErrNoKey
+					}
 				}
+
+				result = newRaftResult(msg.CommandIndex)
+				result.err = e
+				result.val = val
+				result.idem = cmd.Idem
+
+				kv.idems[cmd.Idem] = result
 			}
 
-			ch, hasCh := kv.notifs[msg.CommandIndex]
+			kv.idemsByIndex[msg.CommandIndex] = &result
+
+			notification, exists := kv.notifs[msg.CommandIndex]
 			kv.Unl()
 
-			if hasCh {
+			if exists {
 
-				rr := RaftResult{
-					err: e,
-					val: val,
-				}
+				notification.Broadcast()
 
-				ch <- rr
-				close(ch)
+				kv.L()
+				delete(kv.notifs, msg.CommandIndex)
+				kv.Unl()
 			}
 		}
 	}
@@ -188,7 +320,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.store = make(map[string]string)
-	kv.notifs = make(map[int]chan RaftResult)
+	kv.notifs = make(map[int]*sync.Cond)
+	kv.idems = make(map[string]RaftResult)
+	kv.idemsByIndex = make(map[int]*RaftResult)
 
 	kv.applyCh = make(chan raft.ApplyMsg, applyChSize)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)

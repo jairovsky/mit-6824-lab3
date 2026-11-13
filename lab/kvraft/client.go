@@ -56,24 +56,52 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	_ = ck.send(key, value, op)
 }
 
+const requestTimeout time.Duration = 500 * time.Millisecond
+
 func (ck *Clerk) send(key string, value string, op string) string {
 
 	args := KVArgs{
 		Key:   key,
 		Value: value,
 		Op:    op,
+		Idem:  newIdemKey(),
 	}
-	var err Err = ErrUndef
-	reply := KVReply{}
+
 	var i int = ck.lastLeader
+	var result string
+	var err Err = ErrUndef
+	var networkFailures int
+
 	for err != OK && err != ErrNoKey {
 		log.Printf("sending %s to server %d %v", op, i, args)
-		ck.servers[i].Call("KVServer.KVRequest", &args, &reply)
-		err = reply.Err
-		log.Printf("%s response %s", op, err)
 
-		if reply.Err == ErrWrongLeader {
+		requestEnded := make(chan bool)
+		reply := KVReply{Err: ErrUndef}
+		go func() {
+			requestEnded <- ck.servers[i].Call("KVServer.KVRequest", &args, &reply)
+			close(requestEnded)
+		}()
+
+		select {
+		case networkOk := <-requestEnded:
+
+			if !networkOk {
+				networkFailures += 1
+				break
+			}
+
+			result = reply.Value
+			err = reply.Err
+			log.Printf("%s response %s", op, err)
+
+		case <-time.After(requestTimeout):
+			networkFailures += 1
+		}
+
+		if networkFailures > 5 || reply.Err == ErrWrongLeader {
+			networkFailures = 0
 			i = (i + 1) % len(ck.servers)
+			log.Printf("changing leader %d", i)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -81,7 +109,7 @@ func (ck *Clerk) send(key string, value string, op string) string {
 	ck.lastLeader = i
 	log.Printf("%s round ended", op)
 
-	return reply.Value
+	return result
 }
 
 func (ck *Clerk) Put(key string, value string) {

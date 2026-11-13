@@ -123,6 +123,14 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+func (rf *Raft) LastLogIndex() int {
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	return rf.lastLogIndex() + offset1IndexedArray
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -280,7 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply **AppendEntriesRepl
 			rf.durable.log = append(rf.durable.log, args.Entries...)
 			changedState = true
 		}
-		log.Printf("%d log after appending %v %v", rf.me, args.Entries, rf.durable.log)
+		// log.Printf("%d log after appending %v %v", rf.me, args.Entries, rf.durable.log)
 
 		if args.LeaderCommit > rf.volatile.commitIndex {
 			rf.volatile.commitIndex = min(args.LeaderCommit, rf.lastLogIndex())
