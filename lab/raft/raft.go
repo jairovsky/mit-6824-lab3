@@ -91,7 +91,6 @@ type Volatile struct {
 	electionTimer *time.Timer
 	raftState     RaftState
 	rand          *rand.Rand
-	leaderId      int
 	applyCh       chan ApplyMsg
 }
 
@@ -235,7 +234,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply **AppendEntriesRepl
 	}()
 
 	if args.Term > rf.durable.currentTerm {
-		rf.volatile.leaderId = args.LeaderId
 		rf.volatile.raftState = Follower
 		rf.durable.currentTerm = args.Term
 		changedState = true
@@ -436,7 +434,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	log.Printf("%d seed %d\n", rf.me, seed)
 	rf.volatile.rand = rand.New(rand.NewSource(seed))
 	rf.volatile.raftState = Candidate
-	rf.volatile.leaderId = -1
 
 	rf.volatileLeader.nextIndex = make([]int, len(peers))
 	rf.volatileLeader.matchIndex = make([]int, len(peers))
