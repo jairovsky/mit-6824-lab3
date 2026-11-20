@@ -150,7 +150,9 @@ func (kv *KVServer) processRequest(args *KVArgs, done chan *KVReply) {
 		}
 
 		kv.idems[args.Idem] = newRaftResult(index)
-		kv.notifs[index] = sync.NewCond(&sync.Mutex{})
+		if _, exists = kv.notifs[index]; !exists {
+			kv.notifs[index] = sync.NewCond(&sync.Mutex{})
+		}
 	}
 
 	lastIndex := kv.rf.LastLogIndex()
